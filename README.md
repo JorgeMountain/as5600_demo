@@ -1,81 +1,95 @@
 # AS5600 & BNO055 ESP32-S3 Demo
 
-Proyecto de ejemplo para ESP32-S3 que integra:
+Este proyecto para ESP32-S3 muestra cómo:
 
-- Lectura de un codificador magnético **AS5600** por I²C (GPIO4/GPIO5).
-- Lectura de dos AS5600 adicionales usando su salida analógica conectada al ADC.
-- Control de **tres motores** BLDC/ESC vía MCPWM con un patrón simple de avance/retroceso/giro.
-- Lectura opcional de orientación (**BNO055**) en un bus I²C independiente (GPIO13/GPIO14).
+- inicializar un encoder magnético **AS5600** vía I²C (GPIO4/GPIO5) y leer sus registros principales;
+- leer dos AS5600 adicionales por la salida analógica utilizando el ADC interno;
+- controlar tres motores BLDC con MCPWM aplicando un patrón de avance, retroceso y giro;
+- y, de forma opcional, inicializar una IMU **BNO055** en un bus I²C secundario (GPIO13/GPIO14) y recuperar sus ángulos de Euler.
 
-> Probado con ESP-IDF v5.x. Ajusta pines y parámetros según tu hardware.
-
----
-
-## Requerimientos
-
-- ESP32-S3 con ESP-IDF instalado (`idf.py` accesible en la terminal).
-- Tres ESC/motores conectados a los GPIO indicados.
-- Sensor AS5600 con bus I²C (SDA=GPIO4, SCL=GPIO5) y dos sensores adicionales por salida analógica.
-- IMU BNO055 con ADR a GND (dirección 0x28), SDA=GPIO13, SCL=GPIO14 (pull-ups a 3V3), reset fijo a 3V3.
-
-### Pines por defecto
-
-| Componente | Función                        | GPIO |
-|------------|--------------------------------|------|
-| AS5600 (I²C) | SCL                           | 5    |
-|            | SDA                            | 4    |
-| AS5600 (analógico) | OUT #0 -> ADC1_CH1       | 2    |
-|            | OUT #1 -> ADC1_CH2             | 3    |
-| Motores    | Motor 1 PWM / REV              | 16 / 17 |
-|            | Motor 2 PWM / REV              | 18 / 8 |
-|            | Motor 3 PWM / REV              | 20 / 21 |
-| BNO055     | SCL                            | 14   |
-|            | SDA                            | 13   |
-
-> Cambia los defines en `main/init.h` y `main/main.c` si tus conexiones son distintas.
+Todo está escrito con ESP-IDF v5.x.
 
 ---
 
-## Compilación y carga
+## Funcionamiento del código
 
-1. Abre una terminal con el entorno ESP-IDF configurado (`. $IDF_PATH/export.sh`).
-2. Navega al proyecto y selecciona el target si es necesario:
-   ```bash
-   idf.py set-target esp32s3
-   ```
-3. Compila y flashea:
-   ```bash
-   idf.py build flash monitor
-   ```
-4. Observa por consola los datos de sensores (`STATUS`, `ANG`, `ANA0/ANA1`, `IMU[YPR]`) y el patrón de motores.
+1. **`main/main.c`**
+   - Configura el bus I²C principal (GPIO5–SCL / GPIO4–SDA) y el ADC para las salidas analógicas.
+   - Ejecuta una calibración volátil completa del AS5600 principal y carga un registro `CONF` con hysteresis y modo analógico.
+   - Inicializa el BNO055 (dirección 0x28) en un segundo bus I²C usando GPIO14 (SCL) y GPIO13 (SDA); al arrancar se verifica el `CHIP_ID` y se deja el sensor en modo NDOF.
+   - Prepara tres motores (`motor1`, `motor2`, `motor3`) con MCPWM. Cada ciclo de 500 ms aplica un paso del patrón: avance, retroceso o giro.
+   - Mide continuamente: estado del AS5600 (status, AGC, magnitud, ángulo), dos lecturas analógicas, y si la IMU está disponible, los ángulos yaw/pitch/roll. Todo se imprime en consola.
 
----
+2. **`main/init.[ch]`**
+   - Expone `as5600_init_bus`, `as5600_init_analog_encoders`, `as5600_read_analog_deg` y un arreglo con la configuración de los canales ADC (GPIO2→ADC1_CH1 y GPIO3→ADC1_CH2).
+   - Guarda el handle global del AS5600 principal para usos futuros.
 
-## Estructura del proyecto
+3. **`main/as5600_lib.[ch]`**
+   - Implementa la comunicación I²C con el AS5600 (lecturas u8/u16, escritura de ventanas ZPOS/MPOS, lecturas de ángulo y magnitud).
+   - Incluye utilidades para calibración volátil, lectura en grados y escritura del registro `CONF`.
 
-- `main/main.c`: lógica principal, inicialización de sensores, lectura y patrón de motores.
-- `main/init.[ch]`: configuración del AS5600, ADC y utilidades.
-- `main/as5600_lib.[ch]`: funciones auxiliares para el AS5600.
-- `main/bno055.[ch]`: driver I²C para la IMU BNO055.
-- `main/bldc_pwm.[ch]`: control MCPWM para los tres ESC.
+4. **`main/bno055.[ch]`**
+   - Implementa helpers I²C para el BNO055 (escritura/lectura de registros y conversión de aceleración, giro, Euler y magnetómetro).
+   - `BNO055_Init` asegura la configuración del bus, verifica el chip ID, selecciona página 0, define unidades, normaliza modo de potencia y entra en NDOF.
+   - Provee funciones para obtener Euler, aceleraciones, gyro, magnetómetro y perfiles de calibración.
 
----
-
-## Personalización rápida
-
-- **Ganancias motores**: ajusta `MOTOR_PATTERN_MAX_DUTY` para más/menos PWM (por defecto 12%). Modifica `pattern[]` en `motor_demo_step` para otros movimientos.
-- **Encoders analógicos**: si usas otros pines, edita `AS5600_ANALOG*_GPIO` y `*_CHANNEL` en `main/init.h`.
-- **IMU opcional**: si no usas el BNO055, desactiva la inicialización correspondiente en `main/main.c`.
-- **Dirección AS5600**: la biblioteca usa 0x36 (fija). Si combinas con otros dispositivos en el mismo bus, añade un multiplexor o un expander.
+5. **`main/bldc_pwm.[ch]`**
+   - Configura MCPWM para cada motor, crea comparadores, genera PWM para la señal principal y la reversa.
+   - Expone `bldc_set_duty_motor`, que recibe un porcentaje (±100) y lo convierte al duty permitido por el ESC (entre `MOTOR_PWM_BOTTOM_DUTY` y `MOTOR_PWM_TOP_DUTY`).
 
 ---
 
-## Notas
+## Pines utilizados
 
-- No se realiza **burn** en los AS5600; las configuraciones se vuelven a enviar en cada arranque.
-- El patrón de motores supone un robot triangular (“kiwi”). Ajusta signos y magnitudes según tu chasis real.
-- Si el BNO055 no responde, revisa tensiones, pull-ups y que el pin ADR esté a GND. El driver intenta leer `CHIP_ID=0xA0` antes de configurar la IMU.
+| Componente            | Función                | GPIO |
+|-----------------------|------------------------|------|
+| AS5600 (I²C)          | SCL                    | 5    |
+|                       | SDA                    | 4    |
+| AS5600 analógico #0   | OUT (ADC1_CH1)         | 2    |
+| AS5600 analógico #1   | OUT (ADC1_CH2)         | 3    |
+| Motor 1               | PWM / REV              | 16 / 17 |
+| Motor 2               | PWM / REV              | 18 / 8 |
+| Motor 3               | PWM / REV              | 20 / 21 |
+| BNO055 (I²C opcional) | SCL / SDA              | 14 / 13 |
 
 ---
 
-¡Disfruta adaptando el demo a tu plataforma! Contribuciones y mejoras son bienvenidas. ***
+## Ejecución
+
+```
+idf.py set-target esp32s3
+idf.py build flash monitor
+```
+
+La consola mostrará entradas con el formato:
+
+```
+STATUS=0x20  AGC=123  MAG=2048  RAW=1024  ANG=180.00 deg  ANA0=170.50 deg  ANA1=189.75 deg  IMU[YPR]=12.34/1.23/0.45 deg
+```
+
+En cada iteración se alterna el patrón de motores (avance → retroceso → giro) y se repite.
+
+---
+
+## Consideraciones destacadas
+
+- El AS5600 no recibe comandos de **burn**; la calibración es volátil y se repite cada vez que arranca el firmware.
+- El patrón de motores está diseñado como ejemplo para una plataforma triangular (“kiwi”) y calcula los tres deberes a partir de un vector `(vx, vy, ω)`.
+- El driver de la IMU valida el `CHIP_ID` antes de modificar registros; si la lectura falla se avisa en consola y las lecturas IMU no se imprimen.
+
+---
+
+## Árbol de archivos
+
+```
+.
+├── CMakeLists.txt
+├── README.md
+└── main
+    ├── CMakeLists.txt
+    ├── as5600_lib.c / as5600_lib.h
+    ├── bldc_pwm.c / bldc_pwm.h
+    ├── bno055.c / bno055.h
+    ├── init.c / init.h
+    └── main.c
+```
