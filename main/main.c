@@ -28,9 +28,21 @@ static bldc_pwm_motor_t motor3;
 
 #define MOTOR_PWM_FREQ_HZ      50        // ESC tipico
 #define MOTOR_PWM_RES_HZ       1000000   // resolucion de 1 MHz -> 1 tick = 1 us
-#define MOTOR_PWM_BOTTOM_DUTY  55        // ~= 1100us -> minimo del ESC (0..1000)
-#define MOTOR_PWM_TOP_DUTY     97        // ~= 1940us -> maximo del ESC (0..1000)
-#define MOTOR_PATTERN_MAX_DUTY 20.0f
+#define MOTOR_PWM_BOTTOM_DUTY  55        // ~= 1100us -> minimo del ESC 
+#define MOTOR_PWM_TOP_DUTY     97        // ~= 1940us -> maximo del ESC 
+#define MOTOR_DEMO_DEFAULT_DUTY 30.0f    // Duty base % para la demo de motores
+
+static float motor_pattern_duty_percent = MOTOR_DEMO_DEFAULT_DUTY;  // Ajuste global del duty para la demo
+
+static void motor_demo_set_duty_percent(float percent)
+{
+    if (percent < 0.0f) {
+        percent = 0.0f;
+    } else if (percent > 100.0f) {
+        percent = 100.0f;
+    }
+    motor_pattern_duty_percent = percent;
+}
 
 #define BNO055_I2C_PORT     I2C_NUM_0
 #define BNO055_SCL_GPIO     GPIO_NUM_14
@@ -45,53 +57,34 @@ static void motor_apply_duty(bldc_pwm_motor_t *motor, float duty, const char *na
     }
 }
 
-static void motors_drive_vector(float vx, float vy, float omega, float duty_limit, const char *label)
-{
-    const float sin60 = 0.8660254f;
-    const float cos60 = 0.5f;
-
-    // Modelo cinemático para robot tipo "kiwi" con tres ruedas omni separadas 120°
-    // vx: avance lateral (derecha +), vy: avance frontal (adelante +), omega: giro CCW
-    float w1 = vy + omega;
-    float w2 = (-cos60 * vy + sin60 * vx) + omega;
-    float w3 = (-cos60 * vy - sin60 * vx) + omega;
-
-    float max_mag = fmaxf(fabsf(w1), fmaxf(fabsf(w2), fabsf(w3)));
-    float scale = 0.0f;
-    if (max_mag > 0.0f) {
-        scale = duty_limit / max_mag;
-    }
-
-    float duty1 = w1 * scale;
-    float duty2 = w2 * scale;
-    float duty3 = w3 * scale;
-
-    motor_apply_duty(&motor1, duty1, "motor1");
-    motor_apply_duty(&motor2, duty2, "motor2");
-    motor_apply_duty(&motor3, duty3, "motor3");
-
-    ESP_LOGI(TAG, "Patrón motores: %s -> duty [%.1f, %.1f, %.1f]",
-             label, duty1, duty2, duty3);
-}
-
 typedef struct {
-    float vx;
-    float vy;
-    float omega;
+    float scale_m1;
+    float scale_m2;
+    float scale_m3;
     const char *label;
 } motor_pattern_cmd_t;
 
 static void motor_demo_step(void)
 {
     static const motor_pattern_cmd_t pattern[] = {
-        {  0.577350f,  1.000000f,  0.000000f, "Avance (M1 opuesto a M3)" },
-        { -0.577350f, -1.000000f,  0.000000f, "Retroceso (M1 opuesto a M3)" },
-        { 0.0f,        0.0f,        0.6f,      "Giro eje" },
+        {  1.0f,   0.0f, -1.0f, "Avance (M1 adelante, M3 reversa, M2 quieto)" },
+        { -1.0f,   0.0f,  1.0f, "Retroceso (M1 reversa, M3 adelante, M2 quieto)" },
+        {  1.0f,   1.0f,  1.0f, "Giro eje (todos mismo sentido)" },
+        {  0.0f,   0.0f,  0.0f, "Parados" },
     };
     static size_t idx = 0;
 
     const motor_pattern_cmd_t *cmd = &pattern[idx];
-    motors_drive_vector(cmd->vx, cmd->vy, cmd->omega, MOTOR_PATTERN_MAX_DUTY, cmd->label);
+    float duty_m1 = cmd->scale_m1 * motor_pattern_duty_percent;
+    float duty_m2 = cmd->scale_m2 * motor_pattern_duty_percent;
+    float duty_m3 = cmd->scale_m3 * motor_pattern_duty_percent;
+
+    motor_apply_duty(&motor1, duty_m1, "motor1");
+    motor_apply_duty(&motor2, duty_m2, "motor2");
+    motor_apply_duty(&motor3, duty_m3, "motor3");
+
+    ESP_LOGI(TAG, "Patron motores: %s -> duty [%.1f, %.1f, %.1f]",
+             cmd->label, duty_m1, duty_m2, duty_m3);
 
     idx = (idx + 1) % (sizeof(pattern) / sizeof(pattern[0]));
 }
@@ -177,6 +170,8 @@ void app_main(void)
     bldc_set_duty(&motor2, MOTOR_PWM_BOTTOM_DUTY);
     bldc_set_duty(&motor3, MOTOR_PWM_BOTTOM_DUTY);
     vTaskDelay(pdMS_TO_TICKS(3000));  // esperar a que el ESC arme
+
+    motor_demo_set_duty_percent(MOTOR_DEMO_DEFAULT_DUTY);  // Ajusta aquí la intensidad global del patrón
 
     // --- Loop principal ---
     float analog_deg[AS5600_ANALOG_COUNT] = {0};
